@@ -119,7 +119,7 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         self,
         segmentation: PipelineModel = "pyannote/segmentation-3.1",
         segmentation_step: float = 0.1,
-        embedding: PipelineModel = "pyannote/embedding",
+        embedding: PipelineModel = "nvidia/speakerverification_en_titanet_large",
         embedding_exclude_overlap: bool = False,
         clustering: str = "AgglomerativeClustering",
         embedding_batch_size: int = 1,
@@ -539,7 +539,6 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
                 file=file,
                 frames=self._segmentation.model.receptive_field,
             )
-            print("centroids", centroids)
 
             # Map clusters to known speakers based on embedding similarity
             known_embeddings = np.array([emb for emb in known_speakers.values()])
@@ -551,10 +550,33 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
 
             # Create mapping from cluster IDs to speaker names
             cluster_to_speaker = {}
-            for cluster_idx in range(len(centroids)):
+            used_speakers = set()
+
+            # Sort cluster indices by their best similarity scores to prioritize strongest matches
+            cluster_similarities = [
+                (i, np.max(similarities[i])) for i in range(len(centroids))
+            ]
+            cluster_similarities.sort(key=lambda x: x[1], reverse=True)
+
+            for cluster_idx, max_sim in cluster_similarities:
                 best_match_idx = np.argmax(similarities[cluster_idx])
-                if similarities[cluster_idx][best_match_idx] >= similarity_threshold:
-                    cluster_to_speaker[cluster_idx] = known_names[best_match_idx]
+                speaker_name = known_names[best_match_idx]
+
+                if max_sim >= similarity_threshold:
+                    # If this speaker was already assigned, find the existing cluster ID
+                    if speaker_name in used_speakers:
+                        existing_cluster = [
+                            k
+                            for k, v in cluster_to_speaker.items()
+                            if v == speaker_name
+                        ][0]
+                        cluster_to_speaker[cluster_idx] = speaker_name
+                        # Update hard_clusters to use the same cluster ID
+                        mask = hard_clusters == cluster_idx
+                        hard_clusters[mask] = existing_cluster
+                    else:
+                        cluster_to_speaker[cluster_idx] = speaker_name
+                        used_speakers.add(speaker_name)
                 else:
                     cluster_to_speaker[cluster_idx] = f"UNKNOWN_{cluster_idx}"
 
