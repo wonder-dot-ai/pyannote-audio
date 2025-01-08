@@ -669,6 +669,23 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
             # we add them back here
             mapping = {key: mapping.get(key, key) for key in diarization.labels()}
 
+        elif known_speakers:
+            # When known speakers were used, use the cluster_to_speaker mapping
+            # for the known speakers and generate SPEAKER_XX labels for unknowns
+            mapping = {}
+            unknown_count = 0
+
+            for label in diarization.labels():
+                if label in cluster_to_speaker:
+                    if cluster_to_speaker[label].startswith("UNKNOWN_"):
+                        mapping[label] = f"SPEAKER_{unknown_count:02d}"
+                        unknown_count += 1
+                    else:
+                        mapping[label] = cluster_to_speaker[label]
+                else:
+                    mapping[label] = f"SPEAKER_{unknown_count:02d}"
+                    unknown_count += 1
+
         else:
             # when reference is not available, rename hypothesized speakers
             # to human-readable SPEAKER_00, SPEAKER_01, ...
