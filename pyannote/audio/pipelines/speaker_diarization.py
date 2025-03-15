@@ -122,8 +122,8 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         embedding: PipelineModel = "nvidia/speakerverification_en_titanet_large",
         embedding_exclude_overlap: bool = False,
         clustering: str = "AgglomerativeClustering",
-        embedding_batch_size: int = 1,
-        segmentation_batch_size: int = 1,
+        embedding_batch_size: int = 10,
+        segmentation_batch_size: int = 10,
         der_variant: Optional[dict] = None,
         use_auth_token: Union[Text, None] = None,
     ):
