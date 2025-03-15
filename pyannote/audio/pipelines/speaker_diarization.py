@@ -27,6 +27,7 @@ import itertools
 import math
 import textwrap
 import warnings
+import time
 from typing import Callable, Mapping, Optional, Text, Union
 
 import numpy as np
@@ -119,10 +120,10 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         self,
         segmentation: PipelineModel = "pyannote/segmentation-3.1",
         segmentation_step: float = 0.1,
-        embedding: PipelineModel = "nvidia/speakerverification_en_titanet_large",
+        embedding: PipelineModel = "pyannote/embedding",
         embedding_exclude_overlap: bool = False,
         clustering: str = "AgglomerativeClustering",
-        embedding_batch_size: int = 1,
+        embedding_batch_size: int = 5,
         segmentation_batch_size: int = 1,
         der_variant: Optional[dict] = None,
         use_auth_token: Union[Text, None] = None,
@@ -486,19 +487,32 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
             Only returned when `return_embeddings` is True.
         """
 
+        # Start timing the entire process
+        start_time = time.time()
+
         # setup hook (e.g. for debugging purposes)
         hook = self.setup_hook(file, hook=hook)
+        setup_time = time.time()
+        print(f"Hook setup time: {setup_time - start_time:.3f}s")
 
         num_speakers, min_speakers, max_speakers = set_num_speakers(
             num_speakers=num_speakers,
             min_speakers=min_speakers,
             max_speakers=max_speakers,
         )
+        speakers_setup_time = time.time()
+        print(f"Speakers setup time: {speakers_setup_time - setup_time:.3f}s")
 
+        # Timing segmentation step
+        seg_start_time = time.time()
         segmentations = self.get_segmentations(file, hook=hook)
         hook("segmentation", segmentations)
         #   shape: (num_chunks, num_frames, local_num_speakers)
+        seg_end_time = time.time()
+        print(f"Segmentation time: {seg_end_time - seg_start_time:.3f}s")
 
+        # Timing binarization step
+        binarize_start_time = time.time()
         # binarize segmentation
         if self._segmentation.model.specifications.powerset:
             binarized_segmentations = segmentations
@@ -508,7 +522,11 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
                 onset=threshold if threshold else self.segmentation.threshold,
                 initial_state=False,
             )
+        binarize_end_time = time.time()
+        print(f"Binarization time: {binarize_end_time - binarize_start_time:.3f}s")
 
+        # Timing speaker counting step
+        count_start_time = time.time()
         # estimate frame-level number of instantaneous speakers
         count = self.speaker_count(
             binarized_segmentations,
@@ -518,7 +536,11 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         hook("speaker_counting", count)
         #   shape: (num_frames, 1)
         #   dtype: int
+        count_end_time = time.time()
+        print(f"Speaker counting time: {count_end_time - count_start_time:.3f}s")
 
+        # Timing embeddings extraction step
+        embeddings_start_time = time.time()
         embeddings = self.get_embeddings(
             file,
             binarized_segmentations,
@@ -527,7 +549,11 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         )
         hook("embeddings", embeddings)
         #   shape: (num_chunks, local_num_speakers, dimension)
+        embeddings_end_time = time.time()
+        print(f"Embeddings extraction time: {embeddings_end_time - embeddings_start_time:.3f}s")
 
+        # Timing clustering step
+        clustering_start_time = time.time()
         if known_speakers:
             # First perform regular clustering
             hard_clusters, _, centroids = self.clustering(
@@ -604,7 +630,11 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
             )
         # hard_clusters: (num_chunks, num_speakers)
         # centroids: (num_speakers, dimension)
+        clustering_end_time = time.time()
+        print(f"Clustering time: {clustering_end_time - clustering_start_time:.3f}s")
 
+        # Timing speakers validation step
+        validation_start_time = time.time()
         # number of detected clusters is the number of different speakers
         num_different_speakers = np.max(hard_clusters) + 1
 
@@ -630,7 +660,11 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         # speakers due to segmentation errors, so we cap the maximum instantaneous number
         # of speakers by the `max_speakers` value
         count.data = np.minimum(count.data, max_speakers).astype(np.int8)
+        validation_end_time = time.time()
+        print(f"Speakers validation time: {validation_end_time - validation_start_time:.3f}s")
 
+        # Timing reconstruction step
+        reconstruction_start_time = time.time()
         # reconstruct discrete diarization from raw hard clusters
 
         # keep track of inactive speakers
@@ -644,7 +678,11 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
             count,
         )
         hook("discrete_diarization", discrete_diarization)
+        reconstruction_end_time = time.time()
+        print(f"Reconstruction time: {reconstruction_end_time - reconstruction_start_time:.3f}s")
 
+        # Timing annotation step
+        annotation_start_time = time.time()
         # convert to continuous diarization
         diarization = self.to_annotation(
             discrete_diarization,
@@ -652,7 +690,11 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
             min_duration_off=min_duration_off,
         )
         diarization.uri = file["uri"]
+        annotation_end_time = time.time()
+        print(f"Annotation time: {annotation_end_time - annotation_start_time:.3f}s")
 
+        # Timing speaker mapping step
+        mapping_start_time = time.time()
         # at this point, `diarization` speaker labels are integers
         # from 0 to `num_speakers - 1`, aligned with `centroids` rows.
 
@@ -695,16 +737,24 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
             }
 
         diarization = diarization.rename_labels(mapping=mapping)
+        mapping_end_time = time.time()
+        print(f"Speaker mapping time: {mapping_end_time - mapping_start_time:.3f}s")
 
+        # Timing embeddings reordering (if needed)
+        embeddings_reordering_start_time = time.time()
         # at this point, `diarization` speaker labels are strings (or mix of
         # strings and integers when reference is available and some hypothesis
         # speakers are not present in the reference)
 
         if not return_embeddings:
+            total_time = time.time() - start_time
+            print(f"Total processing time: {total_time:.3f}s")
             return diarization
 
         # this can happen when we use OracleClustering
         if centroids is None:
+            total_time = time.time() - start_time
+            print(f"Total processing time: {total_time:.3f}s")
             return diarization, None
 
         # The number of centroids may be smaller than the number of speakers
@@ -723,6 +773,12 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         centroids = centroids[
             [inverse_mapping[label] for label in diarization.labels()]
         ]
+        embeddings_reordering_end_time = time.time()
+        print(f"Embeddings reordering time: {embeddings_reordering_end_time - embeddings_reordering_start_time:.3f}s")
+
+        # Print total processing time
+        total_time = time.time() - start_time
+        print(f"Total processing time: {total_time:.3f}s")
 
         return diarization, centroids
 
