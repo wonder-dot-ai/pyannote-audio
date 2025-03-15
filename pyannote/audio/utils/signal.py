@@ -203,10 +203,8 @@ def binarize_swf(
             "Shape of scores must be (num_chunks, num_frames, num_classes) or (num_frames, num_classes)."
         )
 
-
 class Binarize:
     """Binarize detection scores using hysteresis thresholding
-
     Parameters
     ----------
     onset : float, optional
@@ -223,13 +221,11 @@ class Binarize:
     pad_offset : float, optional
         Extend active regions by moving their end time by that many seconds.
         Defaults to 0s.
-
     Reference
     ---------
     Gregory Gelly and Jean-Luc Gauvain. "Minimum Word Error Training of
     RNN-based Voice Activity Detection", InterSpeech 2015.
     """
-
     def __init__(
         self,
         onset: float = 0.5,
@@ -239,69 +235,32 @@ class Binarize:
         pad_onset: float = 0.0,
         pad_offset: float = 0.0,
     ):
-
         super().__init__()
-
         self.onset = onset
         self.offset = offset or onset
-
         self.pad_onset = pad_onset
         self.pad_offset = pad_offset
-
         self.min_duration_on = min_duration_on
         self.min_duration_off = min_duration_off
-
     def __call__(self, scores: SlidingWindowFeature) -> Annotation:
         """Binarize detection scores
-
         Parameters
         ----------
         scores : SlidingWindowFeature
             Detection scores.
-
         Returns
         -------
         active : Annotation
             Binarized scores.
         """
-
         num_frames, num_classes = scores.data.shape
         frames = scores.sliding_window
         timestamps = [frames[i].middle for i in range(num_frames)]
 
-        # annotation meant to store 'active' regions
-        active = Annotation()
-
-        for k, k_scores in enumerate(scores.data.T):
-
-            label = k if scores.labels is None else scores.labels[k]
-
-            # initial state
-            start = timestamps[0]
-            is_active = k_scores[0] > self.onset
-
-            for t, y in zip(timestamps[1:], k_scores[1:]):
-
-                # currently active
-                if is_active:
-                    # switching from active to inactive
-                    if y < self.offset:
-                        region = Segment(start - self.pad_onset, t + self.pad_offset)
-                        active[region, k] = label
-                        start = t
-                        is_active = False
-
-                # currently inactive
-                else:
-                    # switching from inactive to active
-                    if y > self.onset:
-                        start = t
-                        is_active = True
-
-            # if active at the end, add final region
-            if is_active:
-                region = Segment(start - self.pad_onset, t + self.pad_offset)
-                active[region, k] = label
+        if self.onset == self.offset:
+            active = self._opt_binarize(scores, timestamps)
+        else:
+            active = self._binarize(scores, timestamps)
 
         # because of padding, some active regions might be overlapping: merge them.
         # also: fill same speaker gaps shorter than min_duration_off
@@ -313,6 +272,68 @@ class Binarize:
             for segment, track in list(active.itertracks()):
                 if segment.duration < self.min_duration_on:
                     del active[segment, track]
+
+        return active
+
+    def _binarize(self, scores, timestamps):
+        active = Annotation()
+
+        for k, k_scores in enumerate(scores.data.T):
+            label = k if scores.labels is None else scores.labels[k]
+
+            # initial state
+            start = timestamps[0]
+            is_active = k_scores[0] > self.onset
+
+            for t, y in zip(timestamps[1:], k_scores[1:]):
+                # currently active
+                if is_active:
+                    # switching from active to inactive
+                    if y < self.offset:
+                        region = Segment(start - self.pad_onset, t + self.pad_offset)
+                        active[region, k] = label
+                        start = t
+                        is_active = False
+                # currently inactive
+                else:
+                    # switching from inactive to active
+                    if y > self.onset:
+                        start = t
+                        is_active = True
+            # if active at the end, add final region
+            if is_active:
+                region = Segment(start - self.pad_onset, t + self.pad_offset)
+                active[region, k] = label
+
+        return active
+
+    def _opt_binarize(self, scores, timestamps):
+        active = Annotation()
+
+        for k, k_scores in enumerate(scores.data.T):
+            label = k if scores.labels is None else scores.labels[k]
+
+            # Detect transitions
+            is_active = k_scores > self.onset
+            transitions = np.diff(is_active.astype(int))
+            starts = np.where(transitions == 1)[0] + 1
+            ends = np.where(transitions == -1)[0] + 1
+
+            # If the first frame is active, add it as a start
+            if is_active[0]:
+                starts = np.insert(starts, 0, 0)
+
+            # If the last frame is active, add it as an end
+            if is_active[-1]:
+                ends = np.append(ends, len(is_active) - 1)
+
+            # Create segments
+            for start, end in zip(starts, ends):
+                region = Segment(
+                    timestamps[start] - self.pad_onset,
+                    timestamps[end] + self.pad_offset,
+                )
+                active[region, k] = label
 
         return active
 
